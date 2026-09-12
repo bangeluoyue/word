@@ -49,3 +49,40 @@ nest.js 单词后台管理系统和h5应用开发
 BASS 数据库云服务
 性能、安全、可扩展性、部署成本几乎为0
 - psql 支持embedding + 关系数据库
+
+**Conventional Commits(约定式提交)**规范，也是目前主流的git提交信息风格。
+- feat新增功能
+- fix修复bug
+- docs文档变更
+- refactor代码重构
+- perf性能优化
+- test测试变更
+- chore构建工具变更
+
+coding agent 内置的git提交
+
+## ORM
+
+- 数据库supabase已经云端创建
+    - .env DATABASE_URL
+- next.js 面向对象编程  O Object 高级
+    - 不同国家的人
+    - User  user.save() -> sql insert into
+    - drizzle orm 映射 翻译
+    - psql User Table 低级 sql
+- drizzle 接手数据库 .env
+    - 不需要建表，建立schema,映射的就是数据表。
+    - migrate 数据表迁移
+
+## drizzle
+
+ORM 工具的一种，有一系列的包和命令
+
+- db目录
+    - index.ts 数据库配置、链接并返回db数据库操作句柄。
+    - schema.ts 对象定义数据表结果。
+- 配套一系列的脚本
+    - db:generate 生成数据库迁移文件。数据库加表、改字段、添加索引等，多一个schema文件
+    - db:migrate 数据库迁移
+    - db:push 数据库推送
+    - db:studio 数据库可视化工具
