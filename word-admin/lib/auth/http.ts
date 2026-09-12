@@ -10,11 +10,17 @@ export function isUniqueViolation(error: unknown) {
     && (error as { code?: string }).code === "23505";
 }
 
-export async function requireSystemAdmin() {
+export async function requireAdmin() {
   const admin = await getCurrentAdmin();
   if (!admin) return { response: jsonError("请先登录", 401) } as const;
-  if (admin.role !== "system") {
+  return { admin } as const;
+}
+
+export async function requireSystemAdmin() {
+  const authorization = await requireAdmin();
+  if ("response" in authorization) return authorization;
+  if (authorization.admin.role !== "system") {
     return { response: jsonError("当前账号没有管理员管理权限", 403) } as const;
   }
-  return { admin } as const;
+  return authorization;
 }
