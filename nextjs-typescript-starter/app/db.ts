@@ -1,50 +1,26 @@
-import { drizzle } from 'drizzle-orm/postgres-js';
-import { pgTable, serial, varchar } from 'drizzle-orm/pg-core';
-import { eq } from 'drizzle-orm';
-import postgres from 'postgres';
+import { sql } from 'drizzle-orm';
 import { genSaltSync, hashSync } from 'bcrypt-ts';
 
-// Optionally, if not using email/pass login, you can
-// use the Drizzle adapter for Auth.js / NextAuth
-// https://authjs.dev/reference/adapter/drizzle
-let client = postgres(`${process.env.POSTGRES_URL!}?sslmode=require`);
-let db = drizzle(client);
+import { db } from 'lib/db/client';
+import { users } from 'lib/db/schema';
 
 export async function getUser(email: string) {
-  const users = await ensureTableExists();
-  return await db.select().from(users).where(eq(users.email, email));
+  const normalizedEmail = email.trim().toLowerCase();
+
+  return db
+    .select()
+    .from(users)
+    .where(sql`lower(${users.email}) = ${normalizedEmail}`)
+    .limit(1);
 }
 
 export async function createUser(email: string, password: string) {
-  const users = await ensureTableExists();
-  let salt = genSaltSync(10);
-  let hash = hashSync(password, salt);
+  const normalizedEmail = email.trim().toLowerCase();
+  const salt = genSaltSync(10);
+  const passwordHash = hashSync(password, salt);
 
-  return await db.insert(users).values({ email, password: hash });
-}
-
-async function ensureTableExists() {
-  const result = await client`
-    SELECT EXISTS (
-      SELECT FROM information_schema.tables 
-      WHERE table_schema = 'public' 
-      AND table_name = 'User'
-    );`;
-
-  if (!result[0].exists) {
-    await client`
-      CREATE TABLE "User" (
-        id SERIAL PRIMARY KEY,
-        email VARCHAR(64),
-        password VARCHAR(64)
-      );`;
-  }
-
-  const table = pgTable('User', {
-    id: serial('id').primaryKey(),
-    email: varchar('email', { length: 64 }),
-    password: varchar('password', { length: 64 }),
-  });
-
-  return table;
+  return db
+    .insert(users)
+    .values({ email: normalizedEmail, password: passwordHash })
+    .returning({ id: users.id, email: users.email });
 }

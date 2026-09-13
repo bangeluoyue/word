@@ -1167,6 +1167,15 @@ WordDetailContent
 - 先审计、再清理、再加约束；大表索引需评估锁表时间，生产可使用 `CREATE INDEX CONCURRENTLY` 并从事务型迁移中拆出。
 - 执行前备份数据库，并在预发布环境用生产规模副本测量耗时。
 
+当前仓库使用带校验和和 advisory lock 的迁移器：
+
+```bash
+npm run db:status   # 查看 applied/pending 状态
+npm run db:migrate  # 按文件名顺序应用待执行迁移
+```
+
+已应用迁移禁止修改；任何后续结构调整必须新增编号更大的 SQL 文件。
+
 ### 13.2 上线前数据审计 SQL
 
 检查空关联和非法排名：
