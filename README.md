@@ -111,3 +111,33 @@ ai做，上下文比较大。上下文窗口是有限制的，还得考虑token�
 
 - 本地建schema
 - 后台图书业务
+
+## cascade 级联删除
+
+外键声明后面加上 ON DELETE CASCADE
+
+## Prompt颗粒度
+
+- 上下文一定要准确且清晰
+- 规则或规范，表单字段，业务场景，功能描述要详细表达，不能让LLM去猜
+- LLM擅长的，比如生成代码，让他自己去跑。
+
+## 多端
+
+- PC端
+    - SEO办公
+- h5 手机网页端
+    - 手机端适配
+- 客户端
+    - android
+    - ios
+    - React Native/flutter  
+- 桌面端
+    - C/S架构 electron
+
+## h5 web应用
+
+- nextjs模板
+    - 不用从0开发
+- clear/compact 上下文
+    - 新项目重新启动新的对话窗口
