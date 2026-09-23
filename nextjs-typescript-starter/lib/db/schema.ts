@@ -8,6 +8,7 @@ import {
   integer,
   json,
   pgTable,
+  primaryKey,
   serial,
   text,
   timestamp,
@@ -21,12 +22,11 @@ export type LearningStatus = 'learning' | 'completed';
 export const books = pgTable(
   'books',
   {
-    id: uuid('id').defaultRandom().primaryKey(),
-    title: text('title').notNull(),
+    bookId: text('book_id').primaryKey(),
+    title: varchar('title', { length: 200 }).notNull(),
     wordCount: integer('word_count').default(0).notNull(),
-    coverUrl: text('cover_url'),
-    bookId: text('book_id').notNull(),
-    tags: text('tags'),
+    coverUrl: text('cover_url').notNull(),
+    tags: text('tags').array().default(sql`ARRAY[]::text[]`).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
       .defaultNow()
       .notNull(),
@@ -35,11 +35,11 @@ export const books = pgTable(
       .notNull(),
   },
   (table) => ({
-    bookIdUnique: unique('books_book_id_unique').on(table.bookId),
     wordCountNonnegative: check(
-      'books_word_count_nonnegative',
+      'books_word_count_check',
       sql`${table.wordCount} >= 0`,
     ),
+    updatedAtIndex: index('books_updated_at_idx').on(table.updatedAt),
   }),
 );
 
@@ -56,16 +56,17 @@ export const words = pgTable(
   },
   (table) => ({
     bookForeignKey: foreignKey({
-      name: 'words_book_fk',
+      name: 'words_book_legacy_fk',
       columns: [table.bookId],
       foreignColumns: [books.bookId],
     })
       .onUpdate('cascade')
-      .onDelete('cascade'),
+      .onDelete('set null'),
     rankPositive: check(
       'words_rank_positive',
       sql`${table.wordRank} is null or ${table.wordRank} > 0`,
     ),
+    bookIdIndex: index('words_book_id_idx').on(table.bookId),
     bookRankIdIndex: index('words_book_rank_id_idx').on(
       table.bookId,
       table.wordRank,
@@ -76,19 +77,113 @@ export const words = pgTable(
   }),
 );
 
-export const users = pgTable('User', {
+export const bookWords = pgTable(
+  'book_words',
+  {
+    bookId: text('book_id').notNull(),
+    wordId: bigint('word_id', { mode: 'bigint' }).notNull(),
+    wordRank: integer('word_rank').notNull(),
+    addedAt: timestamp('added_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => ({
+    primaryKey: primaryKey({
+      name: 'book_words_pkey',
+      columns: [table.bookId, table.wordId],
+    }),
+    bookForeignKey: foreignKey({
+      name: 'book_words_book_id_books_book_id_fk',
+      columns: [table.bookId],
+      foreignColumns: [books.bookId],
+    }).onDelete('cascade'),
+    wordForeignKey: foreignKey({
+      name: 'book_words_word_id_words_id_fk',
+      columns: [table.wordId],
+      foreignColumns: [words.id],
+    }).onDelete('restrict'),
+    bookRankUnique: unique('book_words_book_rank_unique').on(
+      table.bookId,
+      table.wordRank,
+    ),
+    rankPositive: check(
+      'book_words_rank_positive',
+      sql`${table.wordRank} > 0`,
+    ),
+    wordIdIndex: index('book_words_word_id_idx').on(table.wordId),
+  }),
+);
+
+export const appUsers = pgTable('app_users', {
   id: serial('id').primaryKey(),
   email: varchar('email', { length: 254 }).notNull(),
   password: varchar('password', { length: 255 }).notNull(),
+  nickName: varchar('nick_name', { length: 24 }),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
     .defaultNow()
     .notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
     .defaultNow()
     .notNull(),
-  // user_email_lower_unique is an expression index and lives in the SQL
-  // migration for compatibility with the installed Drizzle version.
+  // Case-insensitive email and nickname expression indexes live in SQL
+  // migrations for compatibility with the installed Drizzle version.
 });
+
+export const userNotebooks = pgTable(
+  'user_notebooks',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: integer('user_id').notNull(),
+    name: varchar('name', { length: 50 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => ({
+    userForeignKey: foreignKey({
+      name: 'user_notebooks_app_user_fk',
+      columns: [table.userId],
+      foreignColumns: [appUsers.id],
+    }).onDelete('cascade'),
+    nameCheck: check(
+      'user_notebooks_name_check',
+      sql`char_length(btrim(${table.name})) between 1 and 50`,
+    ),
+    userIdIndex: index('user_notebooks_user_id_idx').on(table.userId),
+    // user_notebooks_user_name_unique is an expression index in SQL.
+  }),
+);
+
+export const userNotebookWords = pgTable(
+  'user_notebook_words',
+  {
+    notebookId: uuid('notebook_id').notNull(),
+    wordId: bigint('word_id', { mode: 'bigint' }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => ({
+    primaryKey: primaryKey({
+      name: 'user_notebook_words_pkey',
+      columns: [table.notebookId, table.wordId],
+    }),
+    notebookForeignKey: foreignKey({
+      name: 'user_notebook_words_notebook_fk',
+      columns: [table.notebookId],
+      foreignColumns: [userNotebooks.id],
+    }).onDelete('cascade'),
+    wordForeignKey: foreignKey({
+      name: 'user_notebook_words_word_fk',
+      columns: [table.wordId],
+      foreignColumns: [words.id],
+    }).onDelete('restrict'),
+    wordIdIndex: index('user_notebook_words_word_id_idx').on(table.wordId),
+  }),
+);
 
 export const learningProgress = pgTable(
   'learning_progress',
@@ -115,9 +210,9 @@ export const learningProgress = pgTable(
   },
   (table) => ({
     userForeignKey: foreignKey({
-      name: 'learning_progress_user_fk',
+      name: 'learning_progress_app_user_fk',
       columns: [table.userId],
-      foreignColumns: [users.id],
+      foreignColumns: [appUsers.id],
     }).onDelete('cascade'),
     bookForeignKey: foreignKey({
       name: 'learning_progress_book_fk',
@@ -125,7 +220,7 @@ export const learningProgress = pgTable(
       foreignColumns: [books.bookId],
     })
       .onUpdate('cascade')
-      .onDelete('cascade'),
+      .onDelete('restrict'),
     lastWordForeignKey: foreignKey({
       name: 'learning_progress_last_word_fk',
       columns: [table.lastWordRowId],
@@ -182,6 +277,8 @@ export const schemaMigrations = pgTable('schema_migrations', {
 
 export type Book = typeof books.$inferSelect;
 export type Word = typeof words.$inferSelect;
-export type User = typeof users.$inferSelect;
+export type BookWord = typeof bookWords.$inferSelect;
+export type AppUser = typeof appUsers.$inferSelect;
+export type UserNotebook = typeof userNotebooks.$inferSelect;
+export type UserNotebookWord = typeof userNotebookWords.$inferSelect;
 export type LearningProgress = typeof learningProgress.$inferSelect;
-

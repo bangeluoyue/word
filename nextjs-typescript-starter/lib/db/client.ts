@@ -20,6 +20,7 @@ const globalForDatabase = globalThis as typeof globalThis & {
 export const postgresClient =
   globalForDatabase.wordLearningPostgres ??
   postgres(connectionString, {
+    connect_timeout: 10,
     max: 1,
     prepare: false,
   });
@@ -29,4 +30,3 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 export const db = drizzle(postgresClient, { schema });
-

@@ -11,13 +11,31 @@ export const {
   signOut,
 } = NextAuth({
   ...authConfig,
+  callbacks: {
+    ...authConfig.callbacks,
+    session({ session, token }) {
+      if (session.user && token.sub) {
+        session.user.id = token.sub;
+      }
+      return session;
+    },
+  },
   providers: [
     Credentials({
       async authorize({ email, password }: any) {
-        let user = await getUser(email);
+        if (typeof email !== 'string' || typeof password !== 'string') {
+          return null;
+        }
+
+        const user = await getUser(email);
         if (user.length === 0) return null;
-        let passwordsMatch = await compare(password, user[0].password!);
-        if (passwordsMatch) return user[0] as any;
+        const passwordsMatch = await compare(password, user[0].password);
+        if (!passwordsMatch) return null;
+
+        return {
+          id: String(user[0].id),
+          email: user[0].email,
+        };
       },
     }),
   ],

@@ -1,8 +1,9 @@
 # H5 英语单词学习项目技术设计文档
 
-> 文档版本：v1.0
-> 更新时间：2026-09-13
+> 文档版本：v1.2（小项目精简版）
+> 更新时间：2026-09-15
 > 对应产品文档：[`proposal.md`](./proposal.md)
+> 实施任务：[`tasks.md`](./tasks.md)
 > 项目目录：`nextjs-typescript-starter`
 > 技术阶段：MVP
 
@@ -16,8 +17,9 @@
 - 保证“下一个”操作原子、幂等，避免重复点击或多设备并发导致跳词。
 - 将数据库 JSON 转换为稳定的前端视图模型，容忍可选字段和少量脏数据。
 - 给出目录结构、模块边界、数据查询、鉴权、缓存、错误处理、测试和上线迁移方案。
+- 扩展公共查词、私有笔记本、后台组书、新增公共单词、昵称和发音能力。
 
-本文是实现依据；页面视觉与产品验收口径以 `docs/proposal.md` 为准。
+本文是实现依据；页面视觉与产品验收口径以 `docs/proposal.md` 为准。第 2–18 章记录当前系统和 v1.0 基线，第 19 章是 v1.2 精简目标设计；两者冲突时以第 19 章及 `docs/tasks.md` 为准。
 
 ## 2. 技术基线与现状
 
@@ -37,7 +39,7 @@
 
 ### 2.2 已有数据库表
 
-当前数据库已经存在 `public.words` 和 `public.books`。
+当前数据库已经存在 `public.words` 和 `public.books`。2026-09-14 的只读审计确认：实际库以 `book_id` 作为 `books` 主键，`cover_url` 非空，`tags` 为非空 `text[]`；这与最初需求中提供的 UUID 主键、可空 `cover_url`、`tags text` 定义不同。实现和后续迁移必须以实际结构为准，不得按旧定义重建表。
 
 ```sql
 create table public.words (
@@ -52,18 +54,18 @@ create table public.words (
 
 ```sql
 create table public.books (
-  id uuid not null default gen_random_uuid(),
-  title text not null,
+  book_id text primary key,
+  title varchar(200) not null,
   word_count integer not null default 0,
-  cover_url text null,
-  book_id text not null,
-  tags text null,
+  cover_url text not null,
+  tags text[] not null default array[]::text[],
   created_at timestamp with time zone not null default now(),
   updated_at timestamp with time zone not null default now(),
-  constraint books_pkey primary key (id),
-  constraint books_book_id_unique unique (book_id)
+  constraint books_word_count_check check (word_count >= 0)
 );
 ```
+
+实际库当前有两条等价的 `books.word_count` 检查约束，以及两条从 `words."bookId"` 到 `books.book_id` 的 `ON DELETE CASCADE` 外键。这是两个迁移系统先后纳管共享表留下的重复对象；本期通过一条新的纠偏迁移合并，不能修改已经应用的历史迁移。
 
 字段对应关系：
 
@@ -74,8 +76,8 @@ create table public.books (
 | 单词总数 | `books.word_count` |
 | 单词书封面 | `books.cover_url` |
 | 单词书标签 | `books.tags` |
-| 单词所属书 | `words."bookId"` |
-| 单词排序 | `words."wordRank"`，同排名时以 `words.id` 保证确定顺序 |
+| 单词所属书（v1.0 兼容列） | `words."bookId"`；v1.2 改由 `book_words` 表关联 |
+| 单词排序（v1.0 兼容列） | `words."wordRank"`；v1.2 使用 `book_words.word_rank` |
 | 单词卡回退标题 | `words."headWord"` |
 | 词典结构 | `words.content` JSON |
 
@@ -102,7 +104,7 @@ words.content
 
 当前代码具备可复用的认证基础，但不能原样用于本产品：
 
-- `app/db.ts` 在请求期间通过 `ensureTableExists()` 创建 `"User"` 表；生产设计应改为部署前数据库迁移。
+- `app/db.ts` 曾在请求期间创建旧的 `"User"` 表；现已通过部署前迁移统一为 `app_users`。
 - `app/auth.config.ts` 会把已登录用户访问的所有非 `/protected` 页面重定向到 `/protected`；这会阻止用户访问首页、“我的”和学习页面。
 - `app/login/page.tsx` 登录成功固定跳转 `/protected`；应改为认证弹窗并支持安全的 `returnTo`。
 - `app/register/page.tsx` 注册成功跳转独立登录页；本产品要求注册成功后自动登录。
@@ -145,7 +147,7 @@ words.content
 └─────────────────────────┬────────────────────────────┘
                           ▼
 ┌──────────────────── PostgreSQL ───────────────────────┐
-│ books │ words(JSON) │ "User" │ learning_progress      │
+│ books │ words(JSON) │ app_users │ learning_progress    │
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -241,37 +243,44 @@ nextjs-typescript-starter/
 
 ### 5.1 表关系
 
+以下关系图描述 v1.0 当前结构，供迁移和兼容读取使用；v1.2 目标关系见第 19.1–19.2 节。
+
 ```text
-"User" 1 ─────────── N learning_progress N ─────────── 1 books
+app_users 1 ───────── N learning_progress N ─────────── 1 books
                               │
                               │ last_word_row_id（可空）
                               ▼
                             words N ─────────────────── 1 books
-                                  words."bookId" = books.book_id
+                                  words."bookId" = books.book_id（v1.0 兼容）
 ```
 
 本期新增或正式纳管两张业务相关表：
 
-1. `"User"`：沿用当前认证代码的表名，保存邮箱和密码哈希。
+1. `app_users`：保存 H5 学习用户的邮箱和密码哈希，与后台管理员账号隔离。
 2. `learning_progress`：每个用户、每本书一条连续学习进度。
 
-MVP 不新增“每个用户 × 每个单词”的明细表。产品只要求按固定顺序连续学习和续学，`learning_progress` 的游标与计数已经足够；为每次点击插入明细会显著增加数据量，却不能带来当前功能收益。如果以后增加生词本、熟练度、遗忘曲线或逐词复习，再新增 `user_word_state`，不要提前把它混入当前主流程。
+线性学习进度仍不新增“每个用户 × 每个单词”的掌握明细表：`learning_progress` 的游标与计数已足够。笔记本收藏使用独立的 `user_notebooks` 与 `user_notebook_words`，具体结构见第 19.3 节。
 
 ### 5.2 用户表目标结构
 
-当前 `app/db.ts` 使用大小写敏感的 `public."User"`。为降低认证改造风险，本期保留该表名，但将结构正式迁移并加上数据完整性约束。
+H5 用户统一使用小写的 `public.app_users`，避免 PostgreSQL 大小写敏感标识符；后台继续独立使用 `admin_users`。
 
 ```sql
-create table public."User" (
+create table public.app_users (
   id serial primary key,
   email varchar(254) not null,
   password varchar(255) not null,
+  nick_name varchar(24) null,
   created_at timestamp with time zone not null default now(),
   updated_at timestamp with time zone not null default now()
 );
 
-create unique index user_email_lower_unique
-  on public."User" (lower(email));
+create unique index app_users_email_lower_unique
+  on public.app_users (lower(email));
+
+create unique index app_users_nick_name_lower_unique
+  on public.app_users (lower(btrim(nick_name)))
+  where nick_name is not null;
 ```
 
 设计说明：
@@ -279,6 +288,7 @@ create unique index user_email_lower_unique
 - `password` 列只保存 bcrypt 哈希。保留旧列名是为了兼容当前代码；领域代码中应命名为 `passwordHash`，避免误用。
 - 邮箱写入前执行 `trim().toLowerCase()`；数据库使用 `lower(email)` 唯一索引作为最终并发保护。
 - 注册时捕获 PostgreSQL 唯一冲突码 `23505` 并转换为“该邮箱已注册”，不能只依赖插入前查询。
+- 昵称允许为空；设置时执行 Unicode 字符数、控制字符和保留词校验，并以忽略英文字母大小写的部分唯一索引防并发重复。
 - 无数据库 Adapter 的 Credentials/JWT 会话不需要 `Account`、`Session`、`VerificationToken` 表。
 - 若未来切换 Auth.js 数据库 Adapter，再通过独立迁移补齐其标准表，不能与学习进度表耦合。
 
@@ -299,16 +309,16 @@ create table public.learning_progress (
   updated_at timestamp with time zone not null default now(),
   completed_at timestamp with time zone null,
 
-  constraint learning_progress_user_fk
+  constraint learning_progress_app_user_fk
     foreign key (user_id)
-    references public."User" (id)
+    references public.app_users (id)
     on delete cascade,
 
   constraint learning_progress_book_fk
     foreign key (book_id)
     references public.books (book_id)
     on update cascade
-    on delete cascade,
+    on delete restrict,
 
   constraint learning_progress_last_word_fk
     foreign key (last_word_row_id)
@@ -367,24 +377,24 @@ create index learning_progress_recent_learning_idx
 | `last_word_row_id` | 最近一次由“下一个/完成学习”确认的 `words.id`，不是 JSON 内的 `wordId` |
 | `last_word_rank` | 最近确认单词的排名，用于寻找下一有效词和删除后的降级 |
 | `learned_count` | 已经由用户确认完成的连续单词数量 |
-| `total_words` | 开始学习时该书有效单词数快照 |
+| `total_words` | 开始学习时初始化的有效词数；书籍尾部增加单词时同步校准 |
 | `status` | `learning` 或 `completed` |
 | `version` | 每次推进或重置时加一，用于检测陈旧客户端状态 |
 | `started_at` | 首次成功推进该书的时间；重新学习时重置 |
 | `updated_at` | 最近推进或重置时间，也是“最近学习”的排序字段 |
 | `completed_at` | 全书完成时间，学习中必须为空 |
 
-`last_word_row_id` 外键只能保证单词存在，不能保证该单词属于同一本 `book_id`；推进服务必须显式校验 `words."bookId" = learning_progress.book_id`。
+`last_word_row_id` 外键只能保证单词存在，不能保证该单词属于同一本 `book_id`；推进服务必须通过 `book_words` 显式校验该单词属于 `learning_progress.book_id`。
 
 ### 5.4 为什么保存总词数快照
 
-`books.word_count` 是目录数据，`learning_progress.total_words` 是用户开始本次学习时的快照。快照有三个作用：
+`books.word_count` 是目录数据，`learning_progress.total_words` 是用户开始本次学习时初始化的进度基准。它有三个作用：
 
 - “已学数/总数”和完成状态在同一次学习周期内保持一致。
 - 避免每次展示“我的”都对 `words` 做聚合计数。
 - 数据导入异常时可以发现 `books.word_count` 与有效单词数不一致。
 
-MVP 约定：已发布书籍的 `book_id`、有效单词集合和顺序不可原地修改；修订版使用新的 `book_id`。如果必须修改已发布书，需先设计进度迁移策略，不能直接覆盖导致已完成用户变回学习中。
+v1.2 约定：`book_id` 创建后不可修改；已有学习进度的书不删除或重排成员，只允许在末尾增加单词并同步进度总数。
 
 ### 5.5 现有 books/words 表补强
 
@@ -400,7 +410,7 @@ alter table public.words
   foreign key ("bookId")
   references public.books (book_id)
   on update cascade
-  on delete cascade;
+  on delete set null;
 
 alter table public.words
   add constraint words_rank_positive
@@ -442,7 +452,7 @@ order by "wordRank" asc, id asc
 
 ### 5.7 Drizzle schema 约定
 
-- 在 `lib/db/schema.ts` 集中声明 `books`、`words`、`users`、`learningProgress`，不得由 repository 临时定义表。
+- 在 `lib/db/schema.ts` 集中声明 `books`、`words`、`appUsers`、`learningProgress`，不得由 repository 临时定义表。
 - `words.content` 在数据库行类型中声明为 `unknown` 或宽松 JSON 类型，读取后交给运行时 schema 解析。
 - TypeScript 属性使用 camelCase，数据库列显式映射原名，例如 `wordRank: integer('wordRank')`。
 - `learning_progress.status` 在 TypeScript 中收窄为 `'learning' | 'completed'`。
@@ -658,7 +668,7 @@ order by "wordRank" asc, id asc
 limit 1;
 ```
 
-若 `last_word_row_id` 因词库维护被置空，只能用 `last_word_rank` 回退查找排名更大的词。由于这种降级无法精确处理重复排名，应记录告警；正式数据约束应阻止已发布词库删除或重排。
+若 `last_word_row_id` 因词库维护被置空，只能用 `last_word_rank` 回退查找排名更大的词。因此已有学习进度的书不允许删除或重排单词。
 
 ### 7.4 我的进度查询
 
@@ -742,7 +752,7 @@ advanceWord(bookId, currentWordRowId)
   5. SELECT ... FOR UPDATE 读取该用户、该书的进度
      └─ 如无进度，才计算有效总词数，使用 ON CONFLICT DO NOTHING 初始化，
         随后重新 SELECT ... FOR UPDATE（处理并发首次推进）
-  6. 后续推进使用进度中的 total_words 快照，不在每次点击重新 count 全书
+  6. 后续推进使用进度中的 total_words，不在每次点击重新 count 全书；后台尾部追加时按第 19.2 节统一校准
   7. 根据锁定后的游标计算服务端期望展示的当前单词
   8. 校验客户端 currentWordRowId
      ├─ 等于期望当前词：允许推进
@@ -863,7 +873,7 @@ export type ActionResult<T> =
 #### Credentials authorize
 
 - 对输入进行运行时校验；邮箱 `trim + lowercase`。
-- 按规范化邮箱查询 `"User"`。
+- 按规范化邮箱查询 `app_users`。
 - 用户不存在和密码不匹配都返回同一个认证失败结果。
 - 使用 `bcrypt-ts.compare` 比较哈希。
 - 返回最小用户对象 `{ id: String(user.id), email: user.email }`。
@@ -1273,7 +1283,7 @@ having b.word_count <> count(w.id) filter (
 
 1. 备份并执行第 13.2 节审计。
 2. 确认 `words.content` 根路径，修复或隔离无效数据。
-3. 创建或正式迁移 `"User"`，清理重复邮箱后增加小写唯一索引。
+3. 正式迁移 `app_users`，清理重复邮箱后增加小写唯一索引。
 4. 为 `books/words` 增加非破坏性索引和检查约束。
 5. 清理孤儿数据后增加 `words → books` 外键。
 6. 创建 `learning_progress`、唯一约束、外键和索引。
@@ -1426,7 +1436,7 @@ durationMs
 | --- | --- | --- |
 | 页面架构 | Next.js App Router + RSC + Server Action | 贴合现有项目，减少客户端 API 瀑布 |
 | 客户端状态 | 局部状态，不引入全局 store | 服务端进度是唯一事实源，当前交互规模较小 |
-| 用户表 | 保留 `"User"` 表名并正式迁移 | 最大化复用现有 Credentials 代码 |
+| 用户表 | 使用 `app_users`，与 `admin_users` 分离 | 避免大小写陷阱并明确普通用户与管理员边界 |
 | 会话 | Auth.js JWT session | 当前无 Adapter，MVP 无需额外 session 表 |
 | 进度模型 | 每用户每书一条连续进度 | 满足顺序学习，数据量和事务复杂度最低 |
 | 幂等 | 行锁 + 服务端期望当前词校验 | 抵御重复点击和多设备并发 |
@@ -1434,17 +1444,19 @@ durationMs
 | 单词顺序 | `wordRank ASC, id ASC` | rank 不连续或重复时仍确定 |
 | JSON 处理 | 运行时解析后映射两类 ViewModel | 防止可选字段使页面崩溃并控制卡片载荷 |
 | `json`/`jsonb` | MVP 保持 `json` | 当前不需要复杂 JSON 检索，避免整表重写 |
-| 词库修改 | 已发布 `book_id` 内容不可原地重排 | 保证用户进度游标稳定 |
-| 音频 | MVP 不实现 | 只有资源键，没有可信播放地址 |
+| 词库修改 | 有学习进度的书只允许尾部增加 | 保证用户进度游标稳定 |
+| 音频 | 简单服务端代理 | 隔离第三方失败，不建设通用音频平台 |
 
 ## 18. 后续扩展边界
 
-出现以下需求时再新增 `user_word_state` 表：
+以下能力仍可在后续新增 `user_word_state` 表：
 
-- 生词收藏、认识/不认识按钮。
+- 认识/不认识按钮。
 - 每词熟练度、错误次数和最近复习时间。
 - 间隔重复和跨书去重。
 - 用户可以跳着学习或自定义顺序。
+
+本期笔记本收藏使用独立的 `user_notebooks`、`user_notebook_words`，不引入熟练度字段。
 
 建议扩展结构：
 
@@ -1460,3 +1472,260 @@ user_word_state
 ```
 
 该扩展表不替代 `learning_progress`：前者描述逐词掌握情况，后者继续负责一本书的线性入口和汇总进度。
+
+## 19. v1.2 精简技术设计
+
+### 19.1 跨应用边界
+
+```text
+H5 nextjs-typescript-starter                 后台 word-admin
+app_users + Auth.js JWT                      admin_users + admin_sessions
+          │                                            │
+          └────────────── PostgreSQL ──────────────────┘
+                    words（公共词典实体）
+                    books（公共书籍元数据）
+                    book_words（书与词关联）
+
+H5 私有域：user_notebooks、user_notebook_words
+后台写域：words、books、book_words
+```
+
+- H5 与后台继续使用独立账号、Cookie 和授权逻辑。
+- 后台不能直接跳入 H5 `/words` 后获得管理员选词权限；应在 `word-admin` 实现 `/words/select`，复用查询契约和交互规范，而不是复用普通用户会话。
+- 管理员保存的 `books` 都是公共单词书，H5 直接读取；私人笔记本使用独立的 `user_notebooks`，不会进入首页。
+- 共享的 `books`、`words`、`book_words` 迁移统一放在 `word-admin`；H5 只迁移 `app_users`、`learning_progress` 和 `user_*`，避免两个项目重复修改同一张表。
+
+`words.id` 是 PostgreSQL `bigint`。H5 和后台的 ORM、DTO、URL 参数统一使用 `bigint` 或十进制字符串；禁止后台继续使用 JavaScript `number` 模式。
+
+### 19.2 为什么需要 book_words
+
+当前 `words."bookId"` 表示一词只属于一本书，与“同一个公共单词可加入多本书”冲突。不能在选词时更新 `words."bookId"`，否则会把单词从原书移走；也不建议复制整个 `content` JSON，否则详情修正需要同步多份数据。
+
+本期增加多对多关联表，并保留 `words."bookId"`、`words."wordRank"` 作为旧数据兼容字段：
+
+```sql
+-- 旧的一对多列只用于兼容读取，删书时绝不能再级联删除公共词条。
+alter table public.words
+  drop constraint if exists "words_bookId_books_book_id_fk",
+  drop constraint if exists words_book_fk;
+
+alter table public.words
+  add constraint words_book_legacy_fk
+  foreign key ("bookId") references public.books(book_id)
+  on update cascade on delete set null;
+
+-- 词数检查只保留一个规范名称。
+alter table public.books
+  drop constraint if exists books_word_count_nonnegative,
+  drop constraint if exists books_word_count_check;
+
+alter table public.books
+  add constraint books_word_count_check check (word_count >= 0);
+
+-- 有学习进度的书不能被数据库级联删除。
+alter table public.learning_progress
+  drop constraint if exists learning_progress_book_fk;
+
+alter table public.learning_progress
+  add constraint learning_progress_book_fk
+  foreign key (book_id) references public.books(book_id)
+  on update cascade on delete restrict;
+
+create table public.book_words (
+  book_id text not null references public.books(book_id)
+    on update cascade on delete cascade,
+  word_id bigint not null references public.words(id)
+    on delete restrict,
+  word_rank integer not null check (word_rank > 0),
+  added_at timestamp with time zone not null default now(),
+  primary key (book_id, word_id),
+  unique (book_id, word_rank)
+);
+
+create index book_words_word_id_idx on public.book_words(word_id);
+```
+
+迁移只做四件事：创建 `book_words`、按旧字段回填、把 H5 学习查询切到关联表、保留旧字段兼容。新单词不再写旧 `bookId/wordRank`。
+
+模块 0 已于 2026-09-15 实施：共享表迁移为 `word-admin/drizzle/0003_mixed_lucky_pierre.sql`，Schema 索引纳管迁移为 `word-admin/drizzle/0004_remarkable_ozymandias.sql`，进度保护迁移为 `nextjs-typescript-starter/lib/db/migrations/0003_book_relations.sql`。回填后 `book_words` 共 194 条，两个现有书籍的成员数量与顺序均与旧字段一致。
+
+`book_id` 创建后不可修改。新书可自由选择和排序；已有学习进度的书只允许从最大 `word_rank` 后增加单词。追加时在同一事务中更新 `books.word_count` 和该书的 `learning_progress.total_words`；已完成用户改回学习中，以便继续新增单词。
+
+有学习进度的书不允许删除。删除其他书籍时只删除 `book_words` 和书籍本身，不删除 `words`；`learning_progress → books` 使用 `ON DELETE RESTRICT` 作为保护。
+
+`books.word_count` 是派生缓存。`book_words` 增删后应在同一事务中执行：
+
+```sql
+update public.books b
+set word_count = (
+  select count(*) from public.book_words bw where bw.book_id = b.book_id
+), updated_at = now()
+where b.book_id = $1;
+```
+
+服务端返回的数量必须以保存后的关联表计数为准，不能信任浏览器提交的 `wordCount`。
+
+### 19.3 私有笔记本模型
+
+```sql
+create table public.user_notebooks (
+  id uuid primary key default gen_random_uuid(),
+  user_id integer not null references public.app_users(id) on delete cascade,
+  name varchar(50) not null,
+  created_at timestamp with time zone not null default now(),
+  updated_at timestamp with time zone not null default now(),
+  constraint user_notebooks_name_check check (char_length(btrim(name)) between 1 and 50)
+);
+
+create unique index user_notebooks_user_name_unique
+  on public.user_notebooks(user_id, lower(btrim(name)));
+
+create table public.user_notebook_words (
+  notebook_id uuid not null references public.user_notebooks(id) on delete cascade,
+  word_id bigint not null references public.words(id) on delete restrict,
+  created_at timestamp with time zone not null default now(),
+  primary key (notebook_id, word_id)
+);
+
+create index user_notebook_words_word_id_idx
+  on public.user_notebook_words(word_id);
+```
+
+授权规则：
+
+- 所有 Notebook Repository 查询都必须同时带 `user_id = session.user.id`，不能先按 notebook ID 查询再在客户端判断归属。
+- 收藏 Action 只接收 `notebookId[]` 和 `wordRowId`，用户 ID 仅从服务端 Session 获取。
+- 保存收藏使用事务：锁定并验证所有目标笔记本属于当前用户，再批量插入/删除关联；重复提交依靠复合主键保持幂等。
+- “某词是否已收藏”表示它至少存在于当前用户一个笔记本；弹层同时返回每本笔记本的勾选状态。
+- 删除笔记本由外键级联删除关联，不删除 `words`。
+
+模块 2 已于 2026-09-15 实施：H5 迁移 `lib/db/migrations/0004_user_notebooks.sql` 创建两张私有表；搜索页和学习页共用“选择笔记本”底部弹层，保存时由服务端会话提供用户 ID，并在事务中校验笔记本归属。无笔记本时使用 `wordRowId + returnTo` 进入新建页，创建和首次收藏在同一事务完成；游客登录流程使用相同参数恢复收藏意图。
+
+### 19.4 昵称迁移与接口
+
+```sql
+alter table public.app_users
+  add column nick_name varchar(24) null;
+
+create unique index app_users_nick_name_lower_unique
+  on public.app_users(lower(btrim(nick_name)))
+  where nick_name is not null;
+```
+
+`updateNicknameAction`：
+
+1. 调用 `auth()` 并解析用户 ID。
+2. `trim` 后按 Unicode 字符数校验 2–24 字符，拒绝控制字符和保留词。
+3. 更新时同步 `updated_at`；捕获 `23505` 返回“该昵称已被使用”。
+4. 成功后重新验证 `/mine`。Session 可暂不写昵称，页面以数据库为事实源。
+
+新增列必须先允许 `null`，否则历史用户迁移会失败；产品没有要求注册时强制填写昵称。
+
+### 19.5 公共查词与详情
+
+统一以 `words.id` 作为全局词条标识，新路由使用 `/words/[wordRowId]`。原学习详情 URL 可保留兼容跳转，但学习页后续也应改传 `rowId + returnTo`，使尚未加入任何书的新词也能查看详情。
+
+现有 `mapWordRow` 同时要求 `bookId` 和 `wordRank`，不能解析管理员刚创建但尚未入书的公共词。实现前拆分为：
+
+```ts
+type GlobalWordViewModel = {
+  id: string;
+  headWord: string;
+  content: {
+    word: {
+      wordId: string;
+      wordHead: string;
+      content: DictionaryBody;
+    };
+  };
+};
+
+type LearningWordViewModel = GlobalWordViewModel & {
+  bookId: string;
+  wordRank: number;
+};
+```
+
+公共搜索、全局详情、笔记本和后台新词预览只使用 `GlobalWordViewModel`；学习查询通过 `book_words` 追加 `bookId/wordRank` 后再生成 `LearningWordViewModel`。两端至少共享 JSON 契约测试样例，不能各自静默产生不同结构。
+
+模块 1 已于 2026-09-15 实施：`/words` 一次读取最多 500 条仅包含行 ID、原型和第一条有效中文释义的摘要，在客户端按原型执行大小写无关的 `includes` 过滤；`/words/[wordRowId]` 直接按 `words.id` 读取公共词条并复用详情组件，游客无需登录。
+
+当前只有约 194 个单词，MVP 一次读取最多 500 条摘要，由页面做 `includes` 模糊过滤，不做分页和额外搜索索引：
+
+```sql
+select id, headword, primary_translation
+from (
+  select
+    w.id,
+    coalesce(
+      nullif(btrim(w.content -> 'word' ->> 'wordHead'), ''),
+      nullif(btrim(w."headWord"), '')
+    ) as headword,
+    w.content -> 'word' -> 'content' -> 'trans' -> 0 ->> 'tranCn'
+      as primary_translation
+  from public.words w
+) normalized_words
+where headword is not null
+order by lower(headword), id
+limit 500;
+```
+
+- 只搜索 headword，不做中文搜索和拼写纠错。
+- `words.id` 转成字符串传给页面；同形异义词按不同 ID 分行显示。
+- 如果以后数据超过 500 条，再单独增加服务端搜索或分页，本期不提前建设。
+
+建议接口：
+
+| 应用 | 能力 | 实现 |
+| --- | --- | --- |
+| H5 | 搜索公共单词 | Server Component 查询参数或只读 Route Handler |
+| H5 | 查看全局详情 | `/words/[wordRowId]` Server Component |
+| H5 | 收藏状态与保存 | 登录态 Server Action |
+| 后台 | 搜索/多选单词 | `/words/select` + 管理员鉴权 Route Handler |
+| 后台 | 查看详情 | `/words/[wordRowId]` 或 Dialog，显式详情按钮 |
+
+长按只能是增强交互：使用 Pointer Events 定时器时必须处理移动取消、滚动误触和清理，同时保留可见详情按钮、Enter 键和辅助技术标签。
+
+### 19.6 管理员创建单词
+
+后台表单使用结构化 DTO，不允许浏览器直接提交任意 `content` JSON：
+
+```ts
+type CreateWordInput = {
+  headword: string;
+  usPhone?: string;
+  ukPhone?: string;
+  translations: Array<{ chinese: string; english?: string }>;
+  sentences: Array<{ english: string; chinese?: string }>;
+  phrases: Array<{ english: string; chinese?: string }>;
+  memoryMethod?: string;
+  synonyms: Array<{
+    partOfSpeech?: string;
+    translation?: string;
+    words: string[];
+  }>;
+  relatedWords: Array<{
+    partOfSpeech?: string;
+    words: Array<{ headword: string; translation?: string }>;
+  }>;
+};
+```
+
+- Route Handler 校验管理员会话、必填字段和基本长度。
+- 服务端生成 JSON 中的稳定业务 ID，例如 `CUSTOM_<uuid>`；数据库 `words.id` 继续由 identity 生成。
+- 新词的旧 `bookId/wordRank` 为空，书籍成员关系只写 `book_words`。
+- 创建前返回疑似重复列表而不是仅做 headword 唯一限制；同形异义词允许管理员确认后创建。
+- 写入后用与 H5 契约一致的公共词条 mapper 生成详情预览；该 mapper 不要求 `bookId/wordRank`。
+
+### 19.7 发音代理
+
+H5 请求 `GET /api/pronunciation?word=...&accent=uk|us`。服务端将 `uk` 映射到有道 `type=1`，将 `us` 映射到 `type=2`，对单词做 URL 编码并设置约 3 秒超时。第三方失败或返回非音频内容时返回统一错误，页面提示“发音暂不可用”。
+
+客户端只维护一个 `Audio` 实例：播放新发音前停止旧音频。喇叭按钮提供英式/美式标签即可，本期不做缓存、多供应商切换和通用 Provider 抽象。
+
+### 19.8 新增测试重点
+
+- 数据迁移后核对现有两本书的数量和顺序。
+- 验证两个用户不能互相读取笔记本。
+- 手工走通查词、收藏、后台新增词、加入书籍和 H5 学习。
+- 验证昵称重复提示和英美发音失败提示。
